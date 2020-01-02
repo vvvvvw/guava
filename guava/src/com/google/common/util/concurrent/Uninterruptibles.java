@@ -380,6 +380,7 @@ public final class Uninterruptibles {
   @GwtIncompatible // concurrency
   @SuppressWarnings("GoodTime") // should accept a java.time.Duration
   public static void sleepUninterruptibly(long sleepFor, TimeUnit unit) {
+    //sleep 阻塞线程 内部通过Thread.sleep()
     boolean interrupted = false;
     try {
       long remainingNanos = unit.toNanos(sleepFor);
@@ -390,12 +391,14 @@ public final class Uninterruptibles {
           NANOSECONDS.sleep(remainingNanos);
           return;
         } catch (InterruptedException e) {
+          //如果被interrupt可以继续，更新sleep时间，循环继续sleep
           interrupted = true;
           remainingNanos = end - System.nanoTime();
         }
       }
     } finally {
       if (interrupted) {
+        //如果被打断过，sleep过后再真正中断线程
         Thread.currentThread().interrupt();
       }
     }

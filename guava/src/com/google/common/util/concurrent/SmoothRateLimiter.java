@@ -170,9 +170,12 @@ abstract class SmoothRateLimiter extends RateLimiter {
    *   <li>When _unused_, we go right at a constant rate! The rate at which we move to the right is
    *       chosen as maxPermits / warmupPeriod. This ensures that the time it takes to go from 0 to
    *       maxPermits is equal to warmupPeriod.
+   *       当生产令牌r时，我们以恒定速率向右移动！ 我们向右移动的速率为maxPermits / warmupPeriod。
    *   <li>When _used_, the time it takes, as explained in the introductory class note, is equal to
    *       the integral of our function, between X permits and X-K permits, assuming we want to
    *       spend K saved permits.
+   *       当消费令牌，假设我们想要花费K个已保存的令牌，多花费的时间在maxPermits-K许可证和maxPermits
+   *       令牌之间的面积。
    * </ol>
    *
    * <p>In summary, the time it takes to move to the left (spend K permits), is equal to the area of
@@ -182,6 +185,9 @@ abstract class SmoothRateLimiter extends RateLimiter {
    * equal to warmupPeriod. And the time to go from thresholdPermits to 0 is warmupPeriod/2. (The
    * reason that this is warmupPeriod/2 is to maintain the behavior of the original implementation
    * where coldFactor was hard coded as 3.)
+   *
+   * 总的来说，从maxPermits到thresholdPermits的时间等于warmupPeriod。
+   * 从thresholdPermits到0的时间是warmupPeriod / 2
    *
    * <p>It remains to calculate thresholdsPermits and maxPermits.
    *
@@ -199,17 +205,26 @@ abstract class SmoothRateLimiter extends RateLimiter {
    *       <blockquote>
    *       maxPermits = thresholdPermits + 2 * warmupPeriod / (stableInterval + coldInterval)
    *       </blockquote>
+   *       从maxPermits到thresholdPermits的时间等于thresholdPermits和maxPermits之间的函数的积分。
+   *       这是图中梯形的区域，它等于0.5 *（stableInterval + coldInterval）*（maxPermits  -  thresholdPermits）。
+   *       它也等于warmupPeriod，
+   *       所以maxPermits = thresholdPermits + 2 * warmupPeriod /（stableInterval + coldInterval）
    * </ul>
    */
   static final class SmoothWarmingUp extends SmoothRateLimiter {
+    //应该叫缓冲时间，越小，缓冲时间越少，maxPermits越小
     private final long warmupPeriodMicros;
     /**
      * The slope of the line from the stable interval (when permits == 0), to the cold interval
      * (when permits == maxPermits)
+     *
+     * 梯形斜线的斜率 y/x，和codeFactor相关
      */
     private double slope;
 
+    //冷启动阈值，在预热时间内以设定的速率产生的令牌的一半(从thresholdPermits到0的时间是warmupPeriod / 2)
     private double thresholdPermits;
+    //冷启动因子，越大，处于冷启动状态的令牌数越小
     private double coldFactor;
 
     SmoothWarmingUp(
@@ -223,9 +238,12 @@ abstract class SmoothRateLimiter extends RateLimiter {
     void doSetRate(double permitsPerSecond, double stableIntervalMicros) {
       double oldMaxPermits = maxPermits;
       double coldIntervalMicros = stableIntervalMicros * coldFactor;
+      //冷启动令牌阈值(在预热时间内以设定的速率产生的令牌的一半)，当前已经存储的令牌数量>thresholdPermits,则处于冷启动状态，获取令牌需要额外等待一定时间.从thresholdPermits到0的时间是warmupPeriod / 2)
       thresholdPermits = 0.5 * warmupPeriodMicros / stableIntervalMicros;
+      //保证从maxPermits到thresholdPermits的时间等于warmupPeriodMicros
       maxPermits =
           thresholdPermits + 2.0 * warmupPeriodMicros / (stableIntervalMicros + coldIntervalMicros);
+      // 预热梯形的斜度，y/x
       slope = (coldIntervalMicros - stableIntervalMicros) / (maxPermits - thresholdPermits);
       if (oldMaxPermits == Double.POSITIVE_INFINITY) {
         // if we don't special-case this, we would get storedPermits == NaN, below
@@ -233,13 +251,17 @@ abstract class SmoothRateLimiter extends RateLimiter {
       } else {
         storedPermits =
             (oldMaxPermits == 0.0)
+                    //将状态初始化为 冷启动
                 ? maxPermits // initial state is cold
+                    //按比例转换
                 : storedPermits * maxPermits / oldMaxPermits;
       }
     }
 
+    //todo 从maxPermits到 0取令牌，图形阴影部分面积
     @Override
     long storedPermitsToWaitTime(double storedPermits, double permitsToTake) {
+
       double availablePermitsAboveThreshold = storedPermits - thresholdPermits;
       long micros = 0;
       // measuring the integral on the right part of the function (the climbing line)
@@ -261,6 +283,9 @@ abstract class SmoothRateLimiter extends RateLimiter {
       return stableIntervalMicros + permits * slope;
     }
 
+
+    //生产的速率为maxPermits / warmupPeriod
+    //保证了保证在warmUpPeriod时间刚好可以恢复maxPermits个token
     @Override
     double coolDownIntervalMicros() {
       return warmupPeriodMicros / maxPermits;
@@ -275,8 +300,14 @@ abstract class SmoothRateLimiter extends RateLimiter {
    */
   static final class SmoothBursty extends SmoothRateLimiter {
     /** The work (permits) of how many seconds can be saved up if this RateLimiter is unused? */
+    //在RateLimiter未使用时，最多存储几秒的令牌
     final double maxBurstSeconds;
 
+    /**
+     *
+     * @param stopwatch guava中的一个时钟类实例，会通过这个来计算时间及令牌
+     * @param maxBurstSeconds 在ReteLimiter未使用时，最多保存几秒的令牌，默认是1
+     */
     SmoothBursty(SleepingStopwatch stopwatch, double maxBurstSeconds) {
       super(stopwatch);
       this.maxBurstSeconds = maxBurstSeconds;
@@ -288,8 +319,10 @@ abstract class SmoothRateLimiter extends RateLimiter {
       maxPermits = maxBurstSeconds * permitsPerSecond;
       if (oldMaxPermits == Double.POSITIVE_INFINITY) {
         // if we don't special-case this, we would get storedPermits == NaN, below
+        //// Double.POSITIVE_INFINITY 代表无穷大
         storedPermits = maxPermits;
       } else {
+        //新生成的已经存储的令牌数 按照 新的速率和老的数据 的比例 转换
         storedPermits =
             (oldMaxPermits == 0.0)
                 ? 0.0 // initial state
@@ -309,20 +342,30 @@ abstract class SmoothRateLimiter extends RateLimiter {
   }
 
   /** The currently stored permits. */
+  //当前存储令牌数
   double storedPermits;
 
   /** The maximum number of stored permits. */
+  //SmoothBursty:最大存储令牌数 = maxBurstSeconds * stableIntervalMicros
+  //SmoothWarmingUp://最大令牌数 (0.5+2/(1+coldFactor))*预热时间产生的令牌数量
   double maxPermits;
 
   /**
    * The interval between two unit requests, at our stable rate. E.g., a stable rate of 5 permits
    * per second has a stable interval of 200ms.
    */
+  ///添加令牌时间间隔 = SECONDS.toMicros(1L) / permitsPerSecond；(1秒/每秒的令牌数)
   double stableIntervalMicros;
 
   /**
    * The time when the next request (no matter its size) will be granted. After granting a request,
    * this is pushed further in the future. Large requests push this further than small requests.
+   */
+  /*
+   * 下一次请求可以获取令牌的起始时间（其实就是最新一次更新令牌的时间）
+ * 由于RateLimiter允许预消费，上次请求预消费令牌后
+ * 下次请求需要等待相应的时间到nextFreeTicketMicros时刻才可以获取令牌
+ * 预消费原理，在获取令牌不足时，并没有等待到令牌全部生成，而是更新了下次获取令牌时的nextFreeTicketMicros，从而影响的是下次获取令牌的等待时间。
    */
   private long nextFreeTicketMicros = 0L; // could be either in the past or future
 
@@ -330,14 +373,21 @@ abstract class SmoothRateLimiter extends RateLimiter {
     super(stopwatch);
   }
 
+  //先通过调用resync生成令牌以及更新下一期令牌生成时间，然后更新stableIntervalMicros，最后又调用了SmoothBursty的doSetRate
   @Override
   final void doSetRate(double permitsPerSecond, long nowMicros) {
+    //先生成令牌
     resync(nowMicros);
     double stableIntervalMicros = SECONDS.toMicros(1L) / permitsPerSecond;
     this.stableIntervalMicros = stableIntervalMicros;
     doSetRate(permitsPerSecond, stableIntervalMicros);
   }
 
+  /*
+  桶中可存放的最大令牌数由maxBurstSeconds计算而来，其含义为最大存储maxBurstSeconds秒生成的令牌。
+该参数的作用在于，可以更为灵活地控制流量。如，某些接口限制为300次/20秒，某些接口限制为50次/45秒等。
+也就是流量不局限于qps
+   */
   abstract void doSetRate(double permitsPerSecond, double stableIntervalMicros);
 
   @Override
@@ -350,18 +400,28 @@ abstract class SmoothRateLimiter extends RateLimiter {
     return nextFreeTicketMicros;
   }
 
+  //返回需要等待的时间
   @Override
   final long reserveEarliestAvailable(int requiredPermits, long nowMicros) {
+    //首先通过resync生成令牌以及同步nextFreeTicketMicros时间戳
     resync(nowMicros);
     long returnValue = nextFreeTicketMicros;
+    //本次能获取到的令牌数
     double storedPermitsToSpend = min(requiredPermits, this.storedPermits);
+    //从令牌桶中获取令牌后还需要的令牌数量
     double freshPermits = requiredPermits - storedPermitsToSpend;
+    //计算出获取freshPermits还需要等待的时间, 在稳定模式中，这里就是(long) (freshPermits * stableIntervalMicros)
+    //waitMicros代表此次预消费的令牌需要多少时间来恢复
     long waitMicros =
         storedPermitsToWaitTime(this.storedPermits, storedPermitsToSpend)
             + (long) (freshPermits * stableIntervalMicros);
 
+    //更新nextFreeTicketMicros以及storedPermits，这次获取令牌需要的等待到的时间点，
+    // reserveAndGetWaitLength返回需要等待的时间间隔。
     this.nextFreeTicketMicros = LongMath.saturatedAdd(nextFreeTicketMicros, waitMicros);
+    //直接更新已经保存的令牌数
     this.storedPermits -= storedPermitsToSpend;
+    // 返回最新一次能获取到令牌的时间，如果大于当前时间，说明有人预先获取了
     return returnValue;
   }
 
@@ -372,6 +432,7 @@ abstract class SmoothRateLimiter extends RateLimiter {
    *
    * <p>This always holds: {@code 0 <= permitsToTake <= storedPermits}
    */
+  //
   abstract long storedPermitsToWaitTime(double storedPermits, double permitsToTake);
 
   /**
@@ -380,6 +441,10 @@ abstract class SmoothRateLimiter extends RateLimiter {
   abstract double coolDownIntervalMicros();
 
   /** Updates {@code storedPermits} and {@code nextFreeTicketMicros} based on the current time. */
+  //基于当前时间，更新下一次请求令牌的时间，以及当前存储的令牌(可以理解为生成令牌)
+  //延迟计算，如上resync函数。该函数会在每次获取令牌之前调用，其实现思路为，若当前时间晚于nextFreeTicketMicros，
+  // 则计算该段时间内可以生成多少令牌，
+  // 将生成的令牌加入令牌桶中并更新数据。这样一来，只需要在获取令牌时计算一次即可。
   void resync(long nowMicros) {
     // if nextFreeTicket is in the past, resync to now
     if (nowMicros > nextFreeTicketMicros) {
