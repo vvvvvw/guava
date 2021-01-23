@@ -137,6 +137,7 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
    */
   static final int MAXIMUM_CAPACITY = 1 << 30;
 
+  //最大分段数量 2的16次方
   /** The maximum number of segments to allow; used to bound constructor arguments. */
   static final int MAX_SEGMENTS = 1 << 16; // slightly conservative
 
@@ -181,15 +182,19 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
   /** The concurrency level. */
   final int concurrencyLevel;
 
+  //判断key相等的方式
   /** Strategy for comparing keys. */
   final Equivalence<Object> keyEquivalence;
 
+  //判断value相等的方式
   /** Strategy for comparing values. */
   final Equivalence<Object> valueEquivalence;
 
+  //key的引用类型
   /** Strategy for referencing keys. */
   final Strength keyStrength;
 
+  //value的引用类型
   /** Strategy for referencing values. */
   final Strength valueStrength;
 
@@ -199,12 +204,15 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
   /** Weigher to weigh cache entries. */
   final Weigher<K, V> weigher;
 
+  //访问过后 多久过期
   /** How long after the last access to an entry the map will retain that entry. */
   final long expireAfterAccessNanos;
 
+  //写入过后 多久过期
   /** How long after the last write to an entry the map will retain that entry. */
   final long expireAfterWriteNanos;
 
+  //写入多久过后 缓存项 可以被刷新
   /** How long after the last write an entry becomes a candidate for refresh. */
   final long refreshNanos;
 
@@ -216,8 +224,10 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
    * A listener that is invoked when an entry is removed due to expiration or garbage collection of
    * soft/weak entries.
    */
+  //缓存项 移除监听器
   final RemovalListener<K, V> removalListener;
 
+  //时间计量器
   /** Measures time in a testable way. */
   final Ticker ticker;
 
@@ -242,6 +252,7 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
 
     keyStrength = builder.getKeyStrength();
     valueStrength = builder.getValueStrength();
+
 
     keyEquivalence = builder.getKeyEquivalence();
     valueEquivalence = builder.getValueEquivalence();
@@ -273,6 +284,8 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
     // entries. The special casing for size-based eviction is only necessary because that eviction
     // happens per segment instead of globally, so too many segments compared to the maximum size
     // will result in random eviction behavior.
+    //segmentCount就是我们最后的分段数，其保证了每个段至少10个Entry。
+    // 如果没有设置concurrencyLevel这个参数，那么默认就会是4，最后分段数也最多为4
     int segmentShift = 0;
     int segmentCount = 1;
     while (segmentCount < concurrencyLevel && (!evictsBySize() || segmentCount * 20 <= maxWeight)) {
